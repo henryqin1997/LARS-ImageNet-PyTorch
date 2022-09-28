@@ -22,6 +22,7 @@ from lamb import *
 
 warnings.filterwarnings("ignore", "(Possibly )?corrupt EXIF data", UserWarning)
 
+batchsizes = [512]*5 + [1024]*10 + [2048]*10 + [4096]*10 + [2048]*10 + [1024]*10 + [512]*35
 
 def initialize():
     # Training settings
@@ -227,7 +228,7 @@ def get_model(args, num_steps_per_epoch):
         backward_passes_per_step=args.batches_per_allreduce)
 
     # Restore from a previous checkpoint, if initial_epoch is specified.
-    # Horovod: restore on the first worker which will broadcast weights 
+    # Horovod: restore on the first worker which will broadcast weights
     # to other workers.
     if args.resume_from_epoch > 0 and hvd.rank() == 0:
         filepath = args.checkpoint_format.format(epoch=args.resume_from_epoch)
@@ -262,13 +263,15 @@ def train(epoch, model, optimizer, lr_schedules,
     train_loss = Metric('train_loss')
     train_accuracy = Metric('train_accuracy')
 
+    batch_accumulation = batchsizes[epoch]//512
+
     with tqdm(total=len(train_loader),
               desc='Epoch {:3d}/{:3d}'.format(epoch + 1, args.epochs),
               disable=not args.verbose) as t:
+        optimizer.zero_grad()
         for batch_idx, (data, target) in enumerate(train_loader):
             if args.cuda:
                 data, target = data.cuda(non_blocking=True), target.cuda(non_blocking=True)
-            optimizer.zero_grad()
 
             for i in range(0, len(data), args.batch_size):
                 data_batch = data[i:i + args.batch_size]
@@ -286,9 +289,10 @@ def train(epoch, model, optimizer, lr_schedules,
 
             optimizer.synchronize()
 
-            with optimizer.skip_synchronize():
-                optimizer.step()
-
+            if (batch_idx+1)%batch_accumulation==0 or batch_idx==len(train_loader)-1:
+                with optimizer.skip_synchronize():
+                    optimizer.step()
+                optimizer.zero_grad()
             t.set_postfix_str("loss: {:.4f}, acc: {:.2f}%".format(
                 train_loss.avg.item(), 100 * train_accuracy.avg.item()))
             t.update(1)
@@ -344,6 +348,8 @@ if __name__ == '__main__':
     torch.multiprocessing.set_start_method('spawn')
 
     args = initialize()
+
+
 
     train_sampler, train_loader, _, val_loader = get_datasets(args)
 
